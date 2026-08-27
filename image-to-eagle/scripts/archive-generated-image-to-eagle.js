@@ -29,6 +29,11 @@ const DEFAULT_TIMEOUT_MS = Number(process.env.EAGLE_TIMEOUT_MS || 15000);
 const LOCK_TIMEOUT_MS = Number(process.env.EAGLE_FOLDER_LOCK_TIMEOUT_MS || 15000);
 const LOCK_POLL_MS = Number(process.env.EAGLE_FOLDER_LOCK_POLL_MS || 150);
 const DATE_TZ = process.env.EAGLE_DATE_TZ || undefined; // undefined => system local time
+// Alma renders generated images as chat attachments; the file itself lands here.
+const GALLERY_DIR = process.env.ALMA_GALLERY_DIR
+  || path.join(os.homedir(), 'Library', 'Application Support', 'alma', 'gallery_cache');
+const GALLERY_IGNORE_PREFIX = 'upload-'; // user-uploaded files, not generated ones
+const STALE_IMAGE_MS = Number(process.env.EAGLE_STALE_IMAGE_MS || 60 * 60 * 1000);
 
 const HELP = `Archive generated images into Eagle, keeping the exact prompt in annotation.
 
@@ -42,6 +47,11 @@ Image source (at least one required):
   --path PATH            Local image file, or a directory (imports every image inside).
                          Repeatable.
   --url URL              Remote image URL. Repeatable.
+  --latest               Newest generated image in the Alma gallery cache. Use this when
+                         the image came back as a chat attachment with no printed path.
+  --latest-count N       Newest N generated images instead of one.
+  --image-dir DIR        Look in DIR instead of the gallery cache.
+                         Default: ${GALLERY_DIR}
 
 Prompt (required unless --dry-run/--check-connection):
   --prompt TEXT          Exact prompt used for generation.
@@ -87,7 +97,7 @@ Environment:
 
 const FLAGS = new Set([
   'help', 'h', 'dryRun', 'checkConnection', 'promptStdin',
-  'noDateSubfolders', 'flatFolder', 'noCreateFolder', 'skipDuplicate',
+  'noDateSubfolders', 'flatFolder', 'noCreateFolder', 'skipDuplicate', 'latest',
 ]);
 const REPEATABLE = new Set(['path', 'url', 'tag']);
 
@@ -126,8 +136,28 @@ function resolveTags(args) {
 
 // ------------------------------------------------------------ image selection
 
-function collectImages(args) {
+function collectImages(args, state) {
   const local = [];
+
+  if (args.latest || args.latestCount || args.imageDir) {
+    const dir = expandHome(args.imageDir || GALLERY_DIR);
+    if (!fs.existsSync(dir)) throw new Error(`Image directory does not exist: ${dir}`);
+    const count = Math.max(1, Number(args.latestCount || 1));
+    const newest = fs.readdirSync(dir)
+      .filter((f) => !f.startsWith(GALLERY_IGNORE_PREFIX))
+      .map((f) => path.join(dir, f))
+      .filter((f) => fs.statSync(f).isFile() && isImage(f))
+      .sort((a, b) => statMtime(b) - statMtime(a))
+      .slice(0, count)
+      .reverse();
+    if (newest.length === 0) throw new Error(`No generated image found in ${dir}`);
+    const age = Date.now() - statMtime(newest[newest.length - 1]);
+    if (age > STALE_IMAGE_MS) {
+      state.warnings.push(`Newest image in ${dir} is ${Math.round(age / 60000)} minutes old — confirm it is the one just generated.`);
+    }
+    local.push(...newest);
+  }
+
   for (const entry of args.path) {
     const abs = path.resolve(expandHome(entry));
     if (!fs.existsSync(abs)) throw new Error(`Image path does not exist: ${abs}`);
@@ -567,8 +597,11 @@ async function main() {
   const transport = args.transport || 'auto';
   if (!['auto', 'native', 'mcp'].includes(transport)) throw new Error(`Unknown --transport: ${transport}`);
 
-  const { local, remote } = collectImages(args);
-  if (local.length + remote.length === 0) throw new Error('No image supplied. Use --path and/or --url (see --help).');
+  const warnings = [];
+  const { local, remote } = collectImages(args, { warnings });
+  if (local.length + remote.length === 0) {
+    throw new Error('No image supplied. Use --latest for an image that arrived as a chat attachment, or --path / --url (see --help).');
+  }
 
   const prompt = readPrompt(args);
   if (!prompt && !args.dryRun) {
@@ -590,7 +623,7 @@ async function main() {
     tags: resolveTags(args),
     dateName: args.date || localDate(),
     used: new Set(),
-    warnings: [],
+    warnings,
     created: [],
   };
 

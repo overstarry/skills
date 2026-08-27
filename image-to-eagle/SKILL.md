@@ -1,7 +1,9 @@
 ---
 name: image-to-eagle
-description: Use this skill immediately after generating or editing any image with an image generation model. It archives the image into Eagle through the bundled Node script (never direct MCP tool calls) and preserves the exact prompt in Eagle annotation metadata. Trigger after alma image generate/edit, image-gen workflows, generated art, logos, avatars, illustrations, wallpapers, product shots, posters, icons, UI mockups, and batch image outputs. Use it even when the user did not explicitly ask to save the image, unless they explicitly say not to archive.
-allowed-tools: Bash(node *)
+description: Use this skill immediately after generating or editing any image with an image generation model, including when the image comes back only as a chat attachment with no file path. It archives the image into Eagle through the bundled Node script (never direct MCP tool calls) and preserves the exact prompt in Eagle annotation metadata. Trigger after alma image generate/edit, image-gen workflows, generated art, logos, avatars, illustrations, wallpapers, product shots, posters, icons, UI mockups, and batch image outputs. Use it even when the user did not explicitly ask to save the image, unless they explicitly say not to archive.
+allowed-tools:
+  - Bash
+  - Read
 ---
 
 # Image to Eagle
@@ -30,6 +32,21 @@ For selfies, run the selfie workflow first, then archive the final image.
 
 ## Quick start
 
+The image usually arrives one of two ways. Pick the matching form.
+
+**A — the image came back as a chat attachment** (no file path was printed, which is what
+happens with Alma's built-in image generation): archive the newest file in the gallery
+cache with `--latest`.
+
+```bash
+node ~/.agents/skills/image-to-eagle/scripts/archive-generated-image-to-eagle.js \
+  --latest \
+  --prompt "exact prompt used for generation"
+```
+
+**B — a command printed a local path** (`alma image generate`, `alma selfie take`, any
+image-gen workflow returning a path):
+
 ```bash
 node ~/.agents/skills/image-to-eagle/scripts/archive-generated-image-to-eagle.js \
   --path "/absolute/path/to/generated-image.png" \
@@ -37,6 +54,10 @@ node ~/.agents/skills/image-to-eagle/scripts/archive-generated-image-to-eagle.js
   --model "model-name-if-known" \
   --aspect "16:9"
 ```
+
+If the turn that generated the image ran no commands at all, archive on the **next** turn —
+the image is still the newest file in the gallery cache, so `--latest` still finds it.
+`--latest-count N` takes the newest N when one turn produced several.
 
 One JSON object comes back with the item ID and the folder path. Report those in one line.
 
@@ -54,8 +75,10 @@ Remote-only images: `--url https://…` instead of `--path`.
 
 | Option | Purpose |
 | --- | --- |
+| `--latest` / `--latest-count N` | Newest generated image(s) in the Alma gallery cache. |
 | `--path PATH` | Local file or directory. Repeatable. |
 | `--url URL` | Remote image. Repeatable. |
+| `--image-dir DIR` | Search DIR instead of the gallery cache. |
 | `--prompt` / `--prompt-file` / `--prompt-stdin` | The exact prompt. Required. |
 | `--model`, `--action generate\|edit`, `--aspect`, `--source-images` | Generation metadata. |
 | `--name NAME` | Item name. Defaults to a prompt slug plus the date. |
@@ -105,9 +128,17 @@ reference-image notes exactly as sent to the model.
 ## Workflow
 
 1. Generate or edit the image.
-2. Capture the exact final prompt and the local output path(s) from the command output.
-3. Run the script once, passing every path from that generation.
-4. Report the Eagle item ID(s) and the destination folder path. Keep it short.
+2. Capture the exact final prompt.
+3. Locate the file: use the path the command printed, or `--latest` when the image only
+   came back as an attachment.
+4. Run the script once, covering every image from that generation.
+5. Report the Eagle item ID(s) and the destination folder path. Keep it short.
+
+Alma's generated images live in
+`~/Library/Application Support/alma/gallery_cache/` (override with `ALMA_GALLERY_DIR`).
+Files there named `upload-*` are the user's own uploads and are never archived by
+`--latest`. The script warns when the newest file is over an hour old, which usually means
+it is not the image just generated — check before reporting success.
 
 ## Troubleshooting
 
@@ -119,6 +150,8 @@ reference-image notes exactly as sent to the model.
   the reason under `warnings`. Force one side with `--transport native` or `--transport mcp`.
 - Everything times out: Eagle is busy indexing. Retry once with `--timeout 30000`.
 - Uncertain about prompt, folder, or which files to import: `--dry-run` first.
+- `"No generated image found"` with `--latest`: the image never hit the gallery cache. Ask
+  for the path, or pass `--image-dir`.
 
 ## Safety
 
